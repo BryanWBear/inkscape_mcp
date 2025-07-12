@@ -84,6 +84,7 @@ class SVGCanvas:
         self.width = width
         self.height = height
         self.curves = []
+        self.curve_map = {}  # Map curve IDs to curve objects
         self.svg_root = self._create_svg_root()
     
     def _create_svg_root(self) -> ET.Element:
@@ -121,7 +122,56 @@ class SVGCanvas:
         })
         
         self.curves.append(curve)
+        self.curve_map[path_id] = curve
         return path_id
+    
+    def modify_curve(self, curve_id: str, new_curve: CubicBezierCurve) -> bool:
+        """Modify an existing curve by its ID"""
+        if curve_id not in self.curve_map:
+            return False
+        
+        # Update the curve in our map
+        self.curve_map[curve_id] = new_curve
+        
+        # Find and update the corresponding SVG path element
+        for path_elem in self.svg_root.findall(".//path[@id='{}']".format(curve_id)):
+            # Update SVG path data
+            path_data = (
+                f"M {new_curve.start.x},{new_curve.start.y} "
+                f"C {new_curve.control1.x},{new_curve.control1.y} "
+                f"{new_curve.control2.x},{new_curve.control2.y} "
+                f"{new_curve.end.x},{new_curve.end.y}"
+            )
+            
+            if new_curve.closed:
+                path_data += " Z"
+            
+            # Update path attributes
+            path_elem.set("d", path_data)
+            path_elem.set("stroke", new_curve.stroke_color)
+            path_elem.set("stroke-width", str(new_curve.stroke_width))
+            path_elem.set("fill", new_curve.fill)
+            
+            # Also update the curve in the curves list
+            for i, curve in enumerate(self.curves):
+                if self.curve_map.get(f"curve_{i}") == curve:
+                    self.curves[i] = new_curve
+                    break
+            
+            return True
+        
+        return False
+    
+    def get_curve_info(self, curve_id: str) -> Optional[CubicBezierCurve]:
+        """Get information about a specific curve"""
+        return self.curve_map.get(curve_id)
+    
+    def list_curves(self) -> Dict[str, str]:
+        """List all curves with their IDs and basic info"""
+        curve_info = {}
+        for curve_id, curve in self.curve_map.items():
+            curve_info[curve_id] = f"Start: ({curve.start.x}, {curve.start.y}), End: ({curve.end.x}, {curve.end.y})"
+        return curve_info
     
     def to_svg_string(self) -> str:
         """Convert canvas to SVG string"""
@@ -197,6 +247,83 @@ def add_cubic_bezier_curve(
     return f"Added curve {path_id}"
 
 @tool
+def modify_cubic_bezier_curve(
+    curve_id: str,
+    start_x: float, start_y: float,
+    end_x: float, end_y: float,
+    control1_x: float, control1_y: float,
+    control2_x: float, control2_y: float,
+    stroke_color: str = "#000000",
+    stroke_width: float = 2.0,
+    fill: str = "none",
+    closed: bool = False
+) -> str:
+    """
+    Modify an existing cubic Bezier curve by its unique ID.
+    
+    Args:
+        curve_id: Unique ID of the curve to modify (e.g., "curve_0", "curve_1")
+        start_x, start_y: New starting point coordinates
+        end_x, end_y: New ending point coordinates
+        control1_x, control1_y: New first control point coordinates
+        control2_x, control2_y: New second control point coordinates
+        stroke_color: New hex color code for the stroke
+        stroke_width: New width of the stroke line
+        fill: New fill color or 'none'
+        closed: Whether to close the path
+        
+    Returns:
+        Success or error message
+    """
+    # Check if curve exists
+    if curve_id not in canvas.curve_map:
+        available_curves = list(canvas.curve_map.keys())
+        return f"Error: Curve '{curve_id}' not found. Available curves: {available_curves}"
+    
+    # Create new curve object
+    new_curve = CubicBezierCurve(
+        start=CurvePoint(start_x, start_y),
+        end=CurvePoint(end_x, end_y),
+        control1=CurvePoint(control1_x, control1_y),
+        control2=CurvePoint(control2_x, control2_y),
+        stroke_color=stroke_color,
+        stroke_width=stroke_width,
+        fill=fill,
+        closed=closed
+    )
+    
+    # Modify the curve
+    success = canvas.modify_curve(curve_id, new_curve)
+    
+    if success:
+        return f"Successfully modified curve {curve_id}"
+    else:
+        return f"Error: Failed to modify curve {curve_id}"
+
+@tool
+def list_all_curves() -> str:
+    """
+    List all curves currently on the canvas with their IDs and basic information.
+    
+    Returns:
+        Formatted string with curve information
+    """
+    curve_info = canvas.list_curves()
+    
+    if not curve_info:
+        return "No curves found on canvas"
+    
+    result = "Current curves on canvas:\n"
+    for curve_id, info in curve_info.items():
+        curve = canvas.get_curve_info(curve_id)
+        result += f"- {curve_id}: {info}"
+        if curve:
+            result += f", Stroke: {curve.stroke_color}, Width: {curve.stroke_width}, Fill: {curve.fill}"
+        result += "\n"
+    
+    return result
+
+@tool
 def save_and_display_svg(filename: str = "logo_design.svg") -> str:
     """
     Save the current canvas to an SVG file and return the SVG content.
@@ -227,7 +354,7 @@ llm = ChatAnthropic(
 
 
 # Tools available to the agent
-tools = [create_canvas, add_cubic_bezier_curve, save_and_display_svg]
+tools = [create_canvas, add_cubic_bezier_curve, modify_cubic_bezier_curve, list_all_curves, save_and_display_svg]
 tool_executor = ToolNode(tools)
 
 system_prompt = """
@@ -238,7 +365,11 @@ You will be given a design plan that you must follow.
 Core Workflow:
 1. Create Canvas: Set up an appropriate canvas size using create_canvas()
 2. Execute Design: Use add_cubic_bezier_curve() to build the design curve by curve
-3. Finalize: Call save_and_display_svg() to output the final design
+3. Modify Design: Use modify_cubic_bezier_curve() to update existing curves based on user feedback
+4. List Curves: Use list_all_curves() to show current curves when user needs reference
+5. Finalize: Call save_and_display_svg() to output the final design
+6. Accept Human Feedback: Modify curves based on human feedback. Do not create a new canvas.
+7. Finalize again, and accept more human feedback if necessary. This will happen in a loop until the design is complete.
 
 Tool Usage Guidelines:
 
@@ -253,6 +384,12 @@ Curve Implementation:
   - Sharp corners: Place control points very close to endpoints
   - S-curves: Use opposing control point directions
   - Circles/arcs: Control points ~0.552 × radius from endpoints
+
+Curve Modification:
+- Use modify_cubic_bezier_curve() to update existing curves
+- Always specify the correct curve_id (e.g., "curve_0", "curve_1")
+- Use list_all_curves() to help users identify which curves to modify
+- Preserve existing curve properties unless specifically asked to change them
 
 Styling Best Practices:
 - Use consistent stroke widths (typically 2-4px)
@@ -342,6 +479,7 @@ def create_agent():
         tools_or_human_feedback_condition,
     )
     workflow.add_edge("tools", "agent")
+    workflow.add_edge("human_feedback", "agent")
     
     return workflow.compile(checkpointer=memory)
 
@@ -375,15 +513,18 @@ def create_logo(user_request: str, filename: str = "logo_design.svg") -> str:
         event["messages"][-1].pretty_print()
     
     # Get user input
-    user_input = input("Tell me how you want to update the state: ")
+    user_input = input("Tell me which curves you want to update: ")
 
     # We now update the state as if we are the human_feedback node
     agent.update_state(thread, {"messages": user_input}, as_node="human_feedback")
+
+    for event in agent.stream(None, thread, stream_mode="values"):
+        event['messages'][-1].pretty_print()
     
 
 # Example usage
 if __name__ == "__main__":
-    user_input = "waves crashing"
+    user_input = "man on the moon"
         
     if user_input:
         try:
